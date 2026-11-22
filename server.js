@@ -3,6 +3,7 @@ const cors = require('cors');
 const crypto = require('crypto');
 const { run, get, all, initDb } = require('./db');
 const { 
+  BOT_NAMES,
   startGame, 
   resetRoomToWaiting, 
   checkWinCondition, 
@@ -195,9 +196,10 @@ app.post('/api/rooms/:id/leave', authMiddleware, async (req, res) => {
   const leavingPlayer = state.players.find((p) => p.id === req.user.id);
   state.players = state.players.filter((p) => p.id !== req.user.id);
 
-  if (state.players.length === 0) {
+  const humanPlayers = state.players.filter((p) => !p.isBot);
+  if (humanPlayers.length === 0) {
     await run('DELETE FROM rooms WHERE id = ?', [row.id]);
-    return res.json({ ok: true });
+    return;
   }
 
   let newStatus = row.status;
@@ -212,7 +214,7 @@ app.post('/api/rooms/:id/leave', authMiddleware, async (req, res) => {
     }
   }
 
-  const newHostId = row.host_id === req.user.id ? state.players[0].id : row.host_id;
+  const newHostId = row.host_id === user.id ? humanPlayers[0].id : row.host_id;
   await run('UPDATE rooms SET host_id = ?, status = ?, game_state = ? WHERE id = ?', [
     newHostId,
     newStatus,
@@ -254,12 +256,52 @@ app.get('/api/rooms/:id', authMiddleware, async (req, res) => {
   });
 });
 
+// Добавление бота в комнату ожидания (только хост)
+app.post('/api/rooms/:id/add-bot', authMiddleware, async (req, res) => {
+  const row = await get('SELECT * FROM rooms WHERE id = ?', [req.params.id]);
+  if (!row) return res.status(404).json({ error: 'Комната не найдена' });
+  if (row.host_id !== req.user.id) {
+    return res.status(403).json({ error: 'Только создатель может добавлять ботов' });
+  }
+  if (row.status !== 'WAITING') {
+    return res.status(400).json({ error: 'Игра уже началась' });
+  }
+
+  const state = JSON.parse(row.game_state);
+  if (state.players.length >= 12) {
+    return res.status(400).json({ error: 'Комната заполнена (максимум 12 игроков)' });
+  }
+
+  const usedNames = new Set(state.players.map((p) => p.username));
+  const freeName =
+    BOT_NAMES.find((name) => !usedNames.has(name)) || `Бот #${state.players.length + 1}`;
+  const botId = -(Date.now() % 1000000 + state.players.length);
+
+  state.players.push({
+    id: botId,
+    username: freeName,
+    role: null,
+    isAlive: true,
+    isBot: true
+  });
+
+  await run('UPDATE rooms SET game_state = ? WHERE id = ?', [JSON.stringify(state), row.id]);
+
+  res.json({
+    room: { id: row.id, name: row.name, code: row.code, hostId: row.host_id, status: row.status, ...state }
+  });
+});
+
 // Старт игры (только хост)
 app.post('/api/rooms/:id/start', authMiddleware, async (req, res) => {
   const row = await get('SELECT * FROM rooms WHERE id = ?', [req.params.id]);
   if (!row) return res.status(404).json({ error: 'Комната не найдена' });
   if (row.host_id !== req.user.id) {
     return res.status(403).json({ error: 'Только создатель может начать игру' });
+  }
+
+  if (row.status !== 'WAITING') {
+    return res.status(400).json({ error: 'Игра уже запущена' });
   }
 
   let state = JSON.parse(row.game_state);

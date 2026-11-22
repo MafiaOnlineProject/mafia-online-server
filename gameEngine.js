@@ -74,22 +74,115 @@ function checkWinCondition(players) {
   return null;
 }
 
+const BOT_NAMES = [
+  'Бот Виктор',
+  'Бот Анна',
+  'Бот Марк',
+  'Бот Соня',
+  'Бот Артур',
+  'Бот Елена',
+  'Бот Денис',
+  'Бот Кира'
+];
+
+function randomItem(arr) {
+  if (!arr.length) return null;
+  return arr[Math.floor(Math.random() * arr.length)];
+}
+
+function performBotActions(state) {
+  const alive = state.players.filter((p) => p.isAlive);
+
+  if (state.phase === 'NIGHT_MISTRESS') {
+    const mistress = alive.find((p) => p.role === 'MISTRESS' && p.isBot);
+    if (mistress && !state.nightActions.MISTRESS) {
+      const targets = alive.filter(
+        (p) => p.id !== mistress.id && p.id !== state.lastTargets?.MISTRESS
+      );
+      const choice = randomItem(targets);
+      if (choice) state.nightActions.MISTRESS = choice.id;
+    }
+  } else if (state.phase === 'NIGHT_DOCTOR') {
+    const doctor = alive.find((p) => p.role === 'DOCTOR' && p.isBot);
+    if (doctor && !state.nightActions.DOCTOR) {
+      const targets = alive.filter((p) => p.id !== state.lastTargets?.DOCTOR);
+      const choice = randomItem(targets);
+      if (choice) state.nightActions.DOCTOR = choice.id;
+    }
+  } else if (state.phase === 'NIGHT_MAFIA') {
+    const shooter = getActiveMafiaShooter(alive);
+    if (shooter && shooter.isBot && !state.nightActions.MAFIA) {
+      const targets = alive.filter((p) => !isMafiaTeam(p.role));
+      const choice = randomItem(targets);
+      if (choice) state.nightActions.MAFIA = choice.id;
+    }
+  } else if (state.phase === 'NIGHT_DETECTIVE') {
+    const detective = alive.find((p) => p.role === 'DETECTIVE' && p.isBot);
+    if (detective && !state.nightActions.DETECTIVE) {
+      const targets = alive.filter((p) => p.id !== detective.id);
+      const choice = randomItem(targets);
+      if (choice) state.nightActions.DETECTIVE = choice.id;
+    }
+  } else if (state.phase === 'DAY_VOTING') {
+    alive
+      .filter((p) => p.isBot && !state.dayVotes[p.id])
+      .forEach((bot) => {
+        const targets = alive.filter(
+          (p) => p.id !== bot.id && p.id !== state.dayAlibiId
+        );
+        const choice = randomItem(targets);
+        if (choice) state.dayVotes[bot.id] = choice.id;
+      });
+  }
+
+  return state;
+}
+
+function isPhaseReadyToAdvance(state) {
+  const alive = state.players.filter((p) => p.isAlive);
+
+  if (state.phase === 'NIGHT_MISTRESS') {
+    return Boolean(state.nightActions.MISTRESS);
+  }
+  if (state.phase === 'NIGHT_DOCTOR') {
+    return Boolean(state.nightActions.DOCTOR);
+  }
+  if (state.phase === 'NIGHT_MAFIA') {
+    return Boolean(state.nightActions.MAFIA);
+  }
+  if (state.phase === 'NIGHT_DETECTIVE') {
+    return Boolean(state.nightActions.DETECTIVE);
+  }
+  if (state.phase === 'DAY_VOTING') {
+    return alive.every((p) => Boolean(state.dayVotes[p.id]));
+  }
+  return false;
+}
+
 function startGame(state) {
   const updatedPlayers = assignRoles(state.players);
   const firstPhase = getNextNightPhase(updatedPlayers, 0) || 'DAY_VOTING';
 
-  return {
+  let nextState = {
     ...state,
     phase: firstPhase,
     dayNumber: 1,
     phaseEndsAt: Date.now() + NIGHT_DURATION_MS,
-    lastAnnouncement: 'Город засыпает. Начинается первая ночь...',
+    lastAnnouncement: '',
     players: updatedPlayers,
     nightActions: {},
     dayVotes: {},
+    dayAlibiId: null,
     lastTargets: { MISTRESS: null, DOCTOR: null },
     detectiveReport: null
   };
+
+  nextState = performBotActions(nextState);
+  if (isPhaseReadyToAdvance(nextState)) {
+    nextState.phaseEndsAt = Math.min(nextState.phaseEndsAt, Date.now() + 3000);
+  }
+
+  return nextState;
 }
 
 function resolveNight(state) {
@@ -122,6 +215,7 @@ function resolveNight(state) {
   if (mistressTargetId) {
     const visited = updatedPlayers.find((p) => p.id === mistressTargetId);
     if (visited) {
+      dayAlibiId = visited.id;
       announcement += `Любовница провела ночь у игрока ${visited.username} (у него алиби на дневном голосовании). `;
     }
   }
@@ -172,6 +266,7 @@ function resolveNight(state) {
       players: updatedPlayers,
       nightActions: {},
       dayVotes: {},
+      dayAlibiId: null,
       lastTargets: updatedLastTargets,
       detectiveReport
     };
@@ -185,6 +280,7 @@ function resolveNight(state) {
     players: updatedPlayers,
     nightActions: {},
     dayVotes: {},
+    dayAlibiId,
     lastTargets: updatedLastTargets,
     detectiveReport
   };
@@ -237,12 +333,17 @@ function resolveDay(state) {
   }
 
   const nextNightPhase = getNextNightPhase(updatedPlayers, 0) || 'DAY_VOTING';
+
+  const firstRoleLabel = nextNightPhase === 'NIGHT_MISTRESS'
+  ? 'Просыпается Любовница и делает свой выбор...'
+  : 'Просыпается Доктор и решает, кого спасти...';
+
   return {
     ...state,
     phase: nextNightPhase,
     dayNumber: (state.dayNumber || 1) + 1,
     phaseEndsAt: Date.now() + NIGHT_DURATION_MS,
-    lastAnnouncement: `${announcement}Наступает ночь.`,
+    lastAnnouncement: `${announcement}Наступает ночь. ${firstRoleLabel}`,
     players: updatedPlayers,
     nightActions: {},
     dayVotes: {},
@@ -252,6 +353,26 @@ function resolveDay(state) {
 }
 
 function advancePhaseIfExpired(state) {
+  let changed = false;
+
+  const prevActionsCount =
+    Object.keys(state.nightActions || {}).length + Object.keys(state.dayVotes || {}).length;
+  state = performBotActions(state);
+  const nextActionsCount =
+    Object.keys(state.nightActions || {}).length + Object.keys(state.dayVotes || {}).length;
+  if (nextActionsCount !== prevActionsCount) {
+    changed = true;
+  }
+
+  if (
+    state.phaseEndsAt &&
+    isPhaseReadyToAdvance(state) &&
+    state.phaseEndsAt - Date.now() > 3000
+  ) {
+    state.phaseEndsAt = Date.now() + 3000;
+    changed = true;
+  }
+
   if (!state.phaseEndsAt || Date.now() < state.phaseEndsAt) {
     return { state, changed: false };
   }
@@ -260,15 +381,17 @@ function advancePhaseIfExpired(state) {
   if (currentIdx !== -1) {
     const nextPhase = getNextNightPhase(state.players, currentIdx + 1);
     if (nextPhase) {
-      return {
-        changed: true,
-        state: {
-          ...state,
-          phase: nextPhase,
-          phaseEndsAt: Date.now() + NIGHT_DURATION_MS,
-          lastAnnouncement: ''
-        }
+      let nextState = {
+        ...state,
+        phase: nextPhase,
+        phaseEndsAt: Date.now() + NIGHT_DURATION_MS,
+        lastAnnouncement: ''
       };
+      nextState = performBotActions(nextState);
+      if (isPhaseReadyToAdvance(nextState)) {
+        nextState.phaseEndsAt = Date.now() + 3000;
+      }
+      return { changed: true, state: nextState };
     }
     return { changed: true, state: resolveNight(state) };
   }
@@ -277,7 +400,7 @@ function advancePhaseIfExpired(state) {
     return { changed: true, state: resolveDay(state) };
   }
 
-  return { state, changed: false };
+  return { state, changed };
 }
 
 function registerAction(state, userId, targetId) {
@@ -310,6 +433,10 @@ function registerAction(state, userId, targetId) {
     state.dayVotes[userId] = targetId;
   }
 
+  if (state.phaseEndsAt && isPhaseReadyToAdvance(state) && state.phaseEndsAt - Date.now() > 3000) {
+    state.phaseEndsAt = Date.now() + 3000;
+  }
+
   return state;
 }
 
@@ -334,6 +461,7 @@ function resetRoomToWaiting(state) {
 }
 
 module.exports = { 
+  BOT_NAMES,
   isMafiaTeam, 
   checkWinCondition, 
   startGame, 
