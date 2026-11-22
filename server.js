@@ -94,18 +94,27 @@ app.post('/api/auth/login', async (req, res) => {
 
 // Проверка сессии
 app.get('/api/me', authMiddleware, async (req, res) => {
-  const rooms = await all('SELECT * FROM rooms');
+  const rows = await all("SELECT * FROM rooms WHERE status != 'FINISHED' ORDER BY id DESC");
   let activeRoom = null;
 
-  for (const r of rooms) {
-    const state = JSON.parse(r.game_state);
-    if (state.players.some((p) => p.id === req.user.id)) {
-      activeRoom = { id: r.id, name: r.name, code: r.code, hostId: r.host_id, status: r.status, ...state};
-      break;
-    }
+  for (const r of rows) {
+    try {
+      const state = JSON.parse(r.game_state);
+      if (state.players.some((p) => p.id === req.user.id)) {
+        activeRoom = {
+          id: r.id,
+          name: r.name,
+          code: r.code,
+          hostId: r.host_id,
+          status: r.status,
+          ...state
+        };
+        break;
+      }
+    } catch {}
   }
 
-  res.json({ user: req.user, activeRoom });
+  res.json({ serverTime: Date.now(), user: req.user, activeRoom });
 });
 
 // Список комнат
@@ -214,7 +223,7 @@ app.post('/api/rooms/:id/leave', authMiddleware, async (req, res) => {
     }
   }
 
-  const newHostId = row.host_id === user.id ? humanPlayers[0].id : row.host_id;
+  const newHostId = row.host_id === req.user.id ? humanPlayers[0].id : row.host_id;
   await run('UPDATE rooms SET host_id = ?, status = ?, game_state = ? WHERE id = ?', [
     newHostId,
     newStatus,

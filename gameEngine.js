@@ -159,6 +159,28 @@ function isPhaseReadyToAdvance(state) {
   return false;
 }
 
+function isCurrentNightActorBot(state) {
+  const alive = state.players.filter((p) => p.isAlive);
+  if (state.phase === 'NIGHT_MISTRESS') {
+    return Boolean(alive.find((p) => p.role === 'MISTRESS')?.isBot);
+  }
+  if (state.phase === 'NIGHT_DOCTOR') {
+    return Boolean(alive.find((p) => p.role === 'DOCTOR')?.isBot);
+  }
+  if (state.phase === 'NIGHT_MAFIA') {
+    return Boolean(getActiveMafiaShooter(alive)?.isBot);
+  }
+  if (state.phase === 'NIGHT_DETECTIVE') {
+    return Boolean(alive.find((p) => p.role === 'DETECTIVE')?.isBot);
+  }
+  return false;
+}
+
+function getPhaseDurationMs(state) {
+  if (state.phase === 'DAY_VOTING') return DAY_DURATION_MS; 
+  return isCurrentNightActorBot(state) ? 4000 : NIGHT_DURATION_MS;
+}
+
 function startGame(state) {
   const updatedPlayers = assignRoles(state.players);
   const firstPhase = getNextNightPhase(updatedPlayers, 0) || 'DAY_VOTING';
@@ -167,7 +189,7 @@ function startGame(state) {
     ...state,
     phase: firstPhase,
     dayNumber: 1,
-    phaseEndsAt: Date.now() + NIGHT_DURATION_MS,
+    phaseEndsAt: null,
     lastAnnouncement: '',
     players: updatedPlayers,
     nightActions: {},
@@ -178,10 +200,7 @@ function startGame(state) {
   };
 
   nextState = performBotActions(nextState);
-  if (isPhaseReadyToAdvance(nextState)) {
-    nextState.phaseEndsAt = Math.min(nextState.phaseEndsAt, Date.now() + 3000);
-  }
-
+  nextState.phaseEndsAt = Date.now() + getPhaseDurationMs(nextState);
   return nextState;
 }
 
@@ -334,15 +353,18 @@ function resolveDay(state) {
 
   const nextNightPhase = getNextNightPhase(updatedPlayers, 0) || 'DAY_VOTING';
 
-  const firstRoleLabel = nextNightPhase === 'NIGHT_MISTRESS'
-  ? 'Просыпается Любовница и делает свой выбор...'
-  : 'Просыпается Доктор и решает, кого спасти...';
+  const firstRoleMap = {
+    NIGHT_MISTRESS: 'Просыпается Любовница и делает свой выбор...',
+    NIGHT_DOCTOR: 'Просыпается Доктор и решает, кого спасти...',
+    NIGHT_MAFIA: 'Просыпается Мафия и выходит на охоту...'
+  };
+  const firstRoleLabel = firstRoleMap[nextNightPhase] || 'Город засыпает...';
 
-  return {
+  let nextState = {
     ...state,
     phase: nextNightPhase,
     dayNumber: (state.dayNumber || 1) + 1,
-    phaseEndsAt: Date.now() + NIGHT_DURATION_MS,
+    phaseEndsAt: null,
     lastAnnouncement: `${announcement}Наступает ночь. ${firstRoleLabel}`,
     players: updatedPlayers,
     nightActions: {},
@@ -350,31 +372,26 @@ function resolveDay(state) {
     dayAlibiId: null,
     detectiveReport: null
   };
+
+  nextState = performBotActions(nextState);
+  nextState.phaseEndsAt = Date.now() + getPhaseDurationMs(nextState);
+  return nextState;
 }
 
 function advancePhaseIfExpired(state) {
   let changed = false;
 
-  const prevActionsCount =
+  const prevCount =
     Object.keys(state.nightActions || {}).length + Object.keys(state.dayVotes || {}).length;
   state = performBotActions(state);
-  const nextActionsCount =
+  const nextCount =
     Object.keys(state.nightActions || {}).length + Object.keys(state.dayVotes || {}).length;
-  if (nextActionsCount !== prevActionsCount) {
-    changed = true;
-  }
-
-  if (
-    state.phaseEndsAt &&
-    isPhaseReadyToAdvance(state) &&
-    state.phaseEndsAt - Date.now() > 3000
-  ) {
-    state.phaseEndsAt = Date.now() + 3000;
+  if (nextCount !== prevCount) {
     changed = true;
   }
 
   if (!state.phaseEndsAt || Date.now() < state.phaseEndsAt) {
-    return { state, changed: false };
+    return { state, changed };
   }
 
   const currentIdx = NIGHT_ROLES_ORDER.findIndex((step) => step.phase === state.phase);
@@ -384,13 +401,11 @@ function advancePhaseIfExpired(state) {
       let nextState = {
         ...state,
         phase: nextPhase,
-        phaseEndsAt: Date.now() + NIGHT_DURATION_MS,
+        phaseEndsAt: null,
         lastAnnouncement: ''
       };
       nextState = performBotActions(nextState);
-      if (isPhaseReadyToAdvance(nextState)) {
-        nextState.phaseEndsAt = Date.now() + 3000;
-      }
+      nextState.phaseEndsAt = Date.now() + getPhaseDurationMs(nextState);
       return { changed: true, state: nextState };
     }
     return { changed: true, state: resolveNight(state) };
