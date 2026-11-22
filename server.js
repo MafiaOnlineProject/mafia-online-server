@@ -109,7 +109,7 @@ app.get('/api/me', authMiddleware, async (req, res) => {
 
 // Список комнат
 app.get('/api/rooms', authMiddleware, async (req, res) => {
-  const rows = await all('SELECT * FROM rooms ORDER BY id DESC');
+  const rows = await all("SELECT * FROM rooms WHERE status != 'FINISHED' ORDER BY id DESC");
   const rooms = rows.map((r) => {
     const state = JSON.parse(r.game_state);
     return {
@@ -175,7 +175,14 @@ app.post('/api/rooms/:id/join', authMiddleware, async (req, res) => {
   }
 
   res.json({
-    room: { id: row.id, name: row.name, code: row.code, hostId: row.host_id, status: row.status, ...state }
+    room: { 
+      id: row.id, 
+      name: row.name, 
+      code: row.code, 
+      hostId: row.host_id, 
+      status: row.status, 
+      ...state 
+    }
   });
 });
 
@@ -235,7 +242,15 @@ app.get('/api/rooms/:id', authMiddleware, async (req, res) => {
   }
 
   res.json({
-    room: { id: row.id, name: row.name, code: row.code, hostId: row.host_id, status: row.status, ...state }
+    serverTime: Date.now(),
+    room: { 
+      id: row.id, 
+      name: row.name, 
+      code: row.code, 
+      hostId: row.host_id, 
+      status: row.status, 
+      ...state 
+    }
   });
 });
 
@@ -260,7 +275,15 @@ app.post('/api/rooms/:id/start', authMiddleware, async (req, res) => {
   ]);
 
   res.json({
-    room: { id: row.id, name: row.name, code: row.code, hostId: row.host_id, status: 'PLAYING', ...state }
+    serverTime: Date.now(),
+    room: { 
+      id: row.id, 
+      name: row.name, 
+      code: row.code, 
+      hostId: row.host_id, 
+      status: 'PLAYING', 
+      ...state 
+    }
   });
 });
 
@@ -282,7 +305,14 @@ app.post('/api/rooms/:id/restart', authMiddleware, async (req, res) => {
   ]);
 
   res.json({
-    room: { id: row.id, name: row.name, code: row.code, hostId: row.host_id, status: 'WAITING', ...state }
+    room: { 
+      id: row.id, 
+      name: row.name, 
+      code: row.code, 
+      hostId: row.host_id, 
+      status: 'WAITING', 
+      ...state 
+    }
   });
 });
 
@@ -296,7 +326,14 @@ app.post('/api/rooms/:id/action', authMiddleware, async (req, res) => {
 
   await run('UPDATE rooms SET game_state = ? WHERE id = ?', [JSON.stringify(state), row.id]);
   res.json({
-    room: { id: row.id, name: row.name, code: row.code, hostId: row.host_id, status: row.status, ...state }
+    room: { 
+      id: row.id, 
+      name: row.name, 
+      code: row.code, 
+      hostId: row.host_id, 
+      status: row.status, 
+      ...state 
+    }
   });
 });
 
