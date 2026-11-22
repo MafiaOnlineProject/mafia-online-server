@@ -87,6 +87,7 @@ function startGame(state) {
     players: updatedPlayers,
     nightActions: {},
     dayVotes: {},
+    lastTargets: { MISTRESS: null, DOCTOR: null },
     detectiveReport: null
   };
 }
@@ -113,26 +114,25 @@ function resolveNight(state) {
   const effectiveKilledId = isMafiaBlocked ? null : killedId;
   const effectiveCheckedId = isDetectiveBlocked ? null : checkedId;
 
-  // Иммунитет от Любовницы: если Мафия стреляла в того, у кого была Любовница, жертва выживает
-  const savedByMistress = effectiveKilledId && effectiveKilledId === mistressTargetId;
   const savedByDoctor = effectiveKilledId && effectiveKilledId === effectiveHealedId;
 
   let announcement = 'Наступило утро. ';
+  let dayAlibiId = null;
+
   if (mistressTargetId) {
     const visited = updatedPlayers.find((p) => p.id === mistressTargetId);
     if (visited) {
-      announcement += `Любовница провела ночь у игрока ${visited.username}. `;
+      announcement += `Любовница провела ночь у игрока ${visited.username} (у него алиби на дневном голосовании). `;
     }
   }
 
-  if (effectiveKilledId && !savedByMistress && !savedByDoctor) {
+  if (effectiveKilledId && !savedByDoctor) {
     const victim = updatedPlayers.find((p) => p.id === effectiveKilledId);
     if (victim) {
       victim.isAlive = false;
       announcement += `Этой ночью был убит игрок ${victim.username}.`;
+      if (victim.id === dayAlibiId) dayAlibiId = null;
     }
-  } else if (savedByMistress) {
-    announcement += 'Мафия пыталась совершить покушение, но у цели было алиби от Любовницы! Никто не погиб.';
   } else if (savedByDoctor) {
     announcement += 'Мафия выходила на охоту, но Доктор вовремя спас жертву. Никто не погиб.';
   } else {
@@ -157,6 +157,11 @@ function resolveNight(state) {
     }
   }
 
+  const updatedLastTargets = {
+    MISTRESS: mistressTargetId || null,
+    DOCTOR: effectiveHealedId || null
+  };
+
   const winMessage = checkWinCondition(updatedPlayers);
   if (winMessage) {
     return {
@@ -167,6 +172,7 @@ function resolveNight(state) {
       players: updatedPlayers,
       nightActions: {},
       dayVotes: {},
+      lastTargets: updatedLastTargets,
       detectiveReport
     };
   }
@@ -179,6 +185,7 @@ function resolveNight(state) {
     players: updatedPlayers,
     nightActions: {},
     dayVotes: {},
+    lastTargets: updatedLastTargets,
     detectiveReport
   };
 }
@@ -239,6 +246,7 @@ function resolveDay(state) {
     players: updatedPlayers,
     nightActions: {},
     dayVotes: {},
+    dayAlibiId: null,
     detectiveReport: null
   };
 }
@@ -285,8 +293,10 @@ function registerAction(state, userId, targetId) {
   }
 
   if (state.phase === 'NIGHT_MISTRESS' && actor.role === 'MISTRESS') {
+    if (state.lastTargets?.MISTRESS === targetId) return state;
     state.nightActions.MISTRESS = targetId;
   } else if (state.phase === 'NIGHT_DOCTOR' && actor.role === 'DOCTOR') {
+    if (state.lastTargets?.DOCTOR === targetId) return state;
     state.nightActions.DOCTOR = targetId;
   } else if (state.phase === 'NIGHT_MAFIA') {
     const shooter = getActiveMafiaShooter(state.players);
@@ -296,6 +306,7 @@ function registerAction(state, userId, targetId) {
   } else if (state.phase === 'NIGHT_DETECTIVE' && actor.role === 'DETECTIVE') {
     state.nightActions.DETECTIVE = targetId;
   } else if (state.phase === 'DAY_VOTING') {
+    if (state.dayAlibiId === targetId) return state;
     state.dayVotes[userId] = targetId;
   }
 
@@ -317,6 +328,7 @@ function resetRoomToWaiting(state) {
     })),
     nightActions: {},
     dayVotes: {},
+    lastTargets: { MISTRESS: null, DOCTOR: null },
     detectiveReport: null
   };
 }
