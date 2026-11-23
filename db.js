@@ -1,7 +1,10 @@
 const sqlite3 = require('sqlite3').verbose();
 const path = require('path');
+const fs = require('fs');
 
-const dbPath = path.join(__dirname, 'mafia.db');
+const dbPath =
+  process.env.DB_PATH ||
+  (fs.existsSync('/data') ? '/data/mafia.db' : path.join(__dirname, 'mafia.db'));
 const db = new sqlite3.Database(dbPath);
 
 function run(sql, params = []) {
