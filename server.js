@@ -41,6 +41,59 @@ async function authMiddleware(req, res, next) {
   next();
 }
 
+function sanitizeRoomForUser(row, state, userId) {
+  const me = state.players.find((p) => p.id === userId);
+  const amIMafia = me && (me.role === 'MAFIA' || me.role === 'MAFIA_BOSS');
+  const isGameOver = state.phase === 'GAME_OVER';
+
+  const safePlayers = state.players.map((p) => {
+    const isMe = p.id === userId;
+    const isFellowMafia = amIMafia && (p.role === 'MAFIA' || p.role === 'MAFIA_BOSS');
+    const canSeeRole = isGameOver || !p.isAlive || isMe || isFellowMafia;
+
+    return {
+      id: p.id,
+      username: p.username,
+      isAlive: p.isAlive,
+      isBot: Boolean(p.isBot),
+      role: canSeeRole ? p.role : null
+    };
+  });
+
+  const safeDetectiveReport =
+    state.detectiveReport && state.detectiveReport.detectiveId === userId
+      ? state.detectiveReport
+      : null;
+
+  const safeNightActions = {
+    MISTRESS: me?.role === 'MISTRESS' ? state.nightActions?.MISTRESS || null : null,
+    DOCTOR: me?.role === 'DOCTOR' ? state.nightActions?.DOCTOR || null : null,
+    MAFIA: amIMafia ? state.nightActions?.MAFIA || null : null,
+    DETECTIVE: me?.role === 'DETECTIVE' ? state.nightActions?.DETECTIVE || null : null
+  };
+
+  return {
+    id: row.id,
+    name: row.name,
+    code: row.code,
+    hostId: row.host_id,
+    status: row.status,
+    phase: state.phase,
+    dayNumber: state.dayNumber,
+    phaseEndsAt: state.phaseEndsAt,
+    lastAnnouncement: state.lastAnnouncement,
+    dayAlibiId: state.dayAlibiId || null,
+    lastTargets: {
+      MISTRESS: me?.role === 'MISTRESS' ? state.lastTargets?.MISTRESS || null : null,
+      DOCTOR: me?.role === 'DOCTOR' ? state.lastTargets?.DOCTOR || null : null
+    },
+    players: safePlayers,
+    nightActions: safeNightActions,
+    dayVotes: state.dayVotes || {},
+    detectiveReport: safeDetectiveReport
+  };
+}
+
 //Регистрация
 app.post('/api/auth/register', async (req, res) => {
   try {
@@ -101,14 +154,7 @@ app.get('/api/me', authMiddleware, async (req, res) => {
     try {
       const state = JSON.parse(r.game_state);
       if (state.players.some((p) => p.id === req.user.id)) {
-        activeRoom = {
-          id: r.id,
-          name: r.name,
-          code: r.code,
-          hostId: r.host_id,
-          status: r.status,
-          ...state
-        };
+        activeRoom = sanitizeRoomForUser(r, state, req.user.id);
         break;
       }
     } catch {}
@@ -153,15 +199,17 @@ app.post('/api/rooms', authMiddleware, async (req, res) => {
     [name, code, req.user.id, 'WAITING', JSON.stringify(initialState)]
   );
 
+  const row = {
+    id: result.id,
+    name,
+    code,
+    host_id: req.user.id,
+    status: 'WAITING'
+  };
+
   res.json({
-    rooms: {
-      id: result.id,
-      name,
-      code,
-      hostId: req.user.id,
-      status: 'WAITING',
-      ...initialState
-    }
+    serverTime: Date.now(),
+    room: sanitizeRoomForUser(row, initialState, req.user.id)
   });
 });
 
@@ -184,16 +232,7 @@ app.post('/api/rooms/:id/join', authMiddleware, async (req, res) => {
     await run('UPDATE rooms SET game_state = ? WHERE id = ?', [JSON.stringify(state), row.id]);
   }
 
-  res.json({
-    room: { 
-      id: row.id, 
-      name: row.name, 
-      code: row.code, 
-      hostId: row.host_id, 
-      status: row.status, 
-      ...state 
-    }
-  });
+  res.json({ room: sanitizeRoomForUser(row, state, req.user.id) });
 });
 
 // Выход из комнаты
@@ -208,7 +247,7 @@ app.post('/api/rooms/:id/leave', authMiddleware, async (req, res) => {
   const humanPlayers = state.players.filter((p) => !p.isBot);
   if (humanPlayers.length === 0) {
     await run('DELETE FROM rooms WHERE id = ?', [row.id]);
-    return;
+    return res.json({ ok: true });
   }
 
   let newStatus = row.status;
@@ -254,14 +293,7 @@ app.get('/api/rooms/:id', authMiddleware, async (req, res) => {
 
   res.json({
     serverTime: Date.now(),
-    room: { 
-      id: row.id, 
-      name: row.name, 
-      code: row.code, 
-      hostId: row.host_id, 
-      status: row.status, 
-      ...state 
-    }
+    room: sanitizeRoomForUser(row, state, req.user.id)
   });
 });
 
@@ -284,7 +316,10 @@ app.post('/api/rooms/:id/add-bot', authMiddleware, async (req, res) => {
   const usedNames = new Set(state.players.map((p) => p.username));
   const freeName =
     BOT_NAMES.find((name) => !usedNames.has(name)) || `Бот #${state.players.length + 1}`;
-  const botId = -(Date.now() % 1000000 + state.players.length);
+
+  
+  const minBotId = state.players.reduce((min, p) => (p.id < min ? p.id : min), 0);
+  const botId = minBotId - 1;
 
   state.players.push({
     id: botId,
@@ -296,9 +331,7 @@ app.post('/api/rooms/:id/add-bot', authMiddleware, async (req, res) => {
 
   await run('UPDATE rooms SET game_state = ? WHERE id = ?', [JSON.stringify(state), row.id]);
 
-  res.json({
-    room: { id: row.id, name: row.name, code: row.code, hostId: row.host_id, status: row.status, ...state }
-  });
+  res.json({ room: sanitizeRoomForUser(row, state, req.user.id) });
 });
 
 // Старт игры (только хост)
@@ -327,14 +360,7 @@ app.post('/api/rooms/:id/start', authMiddleware, async (req, res) => {
 
   res.json({
     serverTime: Date.now(),
-    room: { 
-      id: row.id, 
-      name: row.name, 
-      code: row.code, 
-      hostId: row.host_id, 
-      status: 'PLAYING', 
-      ...state 
-    }
+    room: sanitizeRoomForUser(row, state, req.user.id)
   });
 });
 
@@ -355,16 +381,7 @@ app.post('/api/rooms/:id/restart', authMiddleware, async (req, res) => {
     row.id
   ]);
 
-  res.json({
-    room: { 
-      id: row.id, 
-      name: row.name, 
-      code: row.code, 
-      hostId: row.host_id, 
-      status: 'WAITING', 
-      ...state 
-    }
-  });
+  res.json({ room: sanitizeRoomForUser(row, state, req.user.id) });
 });
 
 // Отправка ночного хода или дневного голоса
@@ -376,16 +393,7 @@ app.post('/api/rooms/:id/action', authMiddleware, async (req, res) => {
   state = registerAction(state, req.user.id, Number(req.body.targetId));
 
   await run('UPDATE rooms SET game_state = ? WHERE id = ?', [JSON.stringify(state), row.id]);
-  res.json({
-    room: { 
-      id: row.id, 
-      name: row.name, 
-      code: row.code, 
-      hostId: row.host_id, 
-      status: row.status, 
-      ...state 
-    }
-  });
+  res.json({ room: sanitizeRoomForUser(row, state, req.user.id) });
 });
 
 initDb().then(() => {
