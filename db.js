@@ -48,7 +48,8 @@ async function initDb() {
       code TEXT UNIQUE NOT NULL,
       host_id INTEGER NOT NULL,
       status TEXT NOT NULL DEFAULT 'WAITING',
-      game_state TEXT NOT NULL
+      game_state TEXT NOT NULL,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )  
   `);
 }

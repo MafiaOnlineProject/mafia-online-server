@@ -258,7 +258,6 @@ app.post('/api/rooms/:id/leave', authMiddleware, async (req, res) => {
       state.phase = 'GAME_OVER';
       state.phaseEndsAt = null;
       state.lastAnnouncement += ` ${winMessage}`;
-      newStatus = 'FINISHED';
     }
   }
 
@@ -282,9 +281,7 @@ app.get('/api/rooms/:id', authMiddleware, async (req, res) => {
   const check = advancePhaseIfExpired(state);
   if (check.changed) {
     state = check.state;
-    const newStatus = state.phase === 'GAME_OVER' ? 'FINISHED' : row.status;
-    await run('UPDATE rooms SET status = ?, game_state = ? WHERE id = ?', [
-      newStatus,
+    await run('UPDATE rooms SET game_state = ? WHERE id = ?', [
       JSON.stringify(state),
       row.id
     ]);
@@ -400,4 +397,8 @@ initDb().then(() => {
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`Сервер Mafia запущен на http://0.0.0.0:${PORT}`);
   });
+
+  setInterval(() => {
+    run("DELETE FROM rooms WHERE datetime(created_at) < datetime('now', '-3 hours')").catch(() => {});
+  }, 5 * 60 * 1000);
 });

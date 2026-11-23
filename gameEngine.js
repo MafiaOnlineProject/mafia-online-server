@@ -127,11 +127,25 @@ function performBotActions(state) {
     alive
       .filter((p) => p.isBot && !state.dayVotes[p.id])
       .forEach((bot) => {
-        const targets = alive.filter(
-          (p) => p.id !== bot.id && p.id !== state.dayAlibiId
-        );
-        const choice = randomItem(targets);
-        if (choice) state.dayVotes[bot.id] = choice.id;
+        const isBotMafia = bot.role === 'MAFIA' || bot.role === 'MAFIA_BOSS';
+        const targets = alive.filter((p) => {
+          if (p.id === bot.id || p.id === state.dayAlibiId) return false;
+          if (isBotMafia && (p.role === 'MAFIA' || p.role === 'MAFIA_BOSS')) return false;
+          return true;
+        });
+        if (!targets.length) return;
+
+        const validIds = new Set(targets.map((p) => p.id));
+        const existingVotes = Object.values(state.dayVotes).filter((id) => validIds.has(id));
+
+        let targetId = null;
+        if (existingVotes.length > 0 && Math.random() < 0.7) {
+          targetId = randomItem(existingVotes);
+        } else {
+          targetId = randomItem(targets)?.id;
+        }
+
+        if (targetId) state.dayVotes[bot.id] = targetId;
       });
   }
 
