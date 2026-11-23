@@ -285,7 +285,6 @@ app.get('/api/rooms/:id', authMiddleware, async (req, res) => {
       JSON.stringify(state),
       row.id
     ]);
-    row.status = newStatus;
   }
 
   res.json({
