@@ -69,6 +69,7 @@ function sanitizeRoomForUser(row, state, userId) {
     MISTRESS: me?.role === 'MISTRESS' ? state.nightActions?.MISTRESS || null : null,
     DOCTOR: me?.role === 'DOCTOR' ? state.nightActions?.DOCTOR || null : null,
     MAFIA: amIMafia ? state.nightActions?.MAFIA || null : null,
+    MANIAC: me?.role === 'MANIAC' ? state.nightActions?.MANIAC || null : null,
     DETECTIVE: me?.role === 'DETECTIVE' ? state.nightActions?.DETECTIVE || null : null
   };
 
