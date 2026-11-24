@@ -76,6 +76,9 @@ function sanitizeRoomForUser(row, state, userId) {
     DETECTIVE: me?.role === 'DETECTIVE' ? state.nightActions?.DETECTIVE || null : null
   };
 
+  const revealVotes = state.phase === 'DAY_RESULTS' || state.phase === 'GAME_OVER';
+  const myVote = state.dayVotes?.[userId];
+
   return {
     id: row.id,
     name: row.name,
@@ -94,7 +97,7 @@ function sanitizeRoomForUser(row, state, userId) {
     },
     players: safePlayers,
     nightActions: safeNightActions,
-    dayVotes: state.dayVotes || {},
+    dayVotes: revealVotes ? (state.dayVotes || {}) : (myVote ? { [userId]: myVote } : {}),
     detectiveReport: safeDetectiveReport
   };
 }
@@ -371,6 +374,43 @@ app.post('/api/rooms/:id/add-bot', auth, roomRoute(async (req, res) => {
   await run('UPDATE rooms SET game_state = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?', [JSON.stringify(state), row.id]);
 
   res.json({ room: sanitizeRoomForUser(row, state, req.user.id) });
+}));
+
+// Исключение игрока или бота хостом (только в комнате ожидания)
+app.post('/api/rooms/:id/kick', auth, roomRoute(async (req, res) => {
+  const row = await get('SELECT * FROM rooms WHERE id = ?', [req.params.id]);
+  if (!row) return res.status(404).json({ error: 'Комната не найдена' });
+
+  if (row.host_id !== req.user.id) {
+    return res.status(403).json({ error: 'Только создатель комнаты может исключать игроков' });
+  }
+
+  if (row.status !== 'WAITING') {
+    return res.status(400).json({ error: 'Нельзя исключать игроков после начала игры' });
+  }
+
+  const targetId = Number(req.body.targetId);
+  if (targetId === req.user.id) {
+    return res.status(400).json({ error: 'Нельзя исключить самого себя' });
+  }
+
+  const state = JSON.parse(row.game_state);
+  const exists = state.players.some((p) => p.id === targetId);
+  if (!exists) {
+    return res.status(404).json({ error: 'Игрок не найден в комнате' });
+  }
+
+  state.players = state.players.filter((p) => p.id !== targetId);
+
+  await run(
+    'UPDATE rooms SET game_state = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
+    [JSON.stringify(state), row.id]
+  );
+
+  res.json({
+    serverTime: Date.now(),
+    room: sanitizeRoomForUser(row, state, req.user.id)
+  });
 }));
 
 // Старт игры (только хост)

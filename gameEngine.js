@@ -430,12 +430,12 @@ function resolveDay(state) {
   let candidateId = null;
   let isTie = false;
 
-  Object.entries(tally).forEach(([id, count]) => {
+  Object.entries(tally).forEach(([targetIdStr, count]) => {
     if (count > maxVotes) {
       maxVotes = count;
-      candidateId = Number(id);
+      candidateId = Number(targetIdStr);
       isTie = false;
-    } else if (count === maxVotes) {
+    } else if (count === maxVotes && count > 0) {
       isTie = true;
     }
   });
@@ -443,14 +443,14 @@ function resolveDay(state) {
   let updatedPlayers = state.players.map((p) => ({ ...p }));
   let announcement = '';
 
-  if (candidateId && !isTie) {
+  if (!candidateId || isTie) {
+    announcement = 'Голоса разделились поровну (или никто не проголосовал). Никто не покидает город.';
+  } else {
     const exiled = updatedPlayers.find((p) => p.id === candidateId);
     if (exiled) {
       exiled.isAlive = false;
-      announcement = `По итогам голосования город покидает ${exiled.username}. `;
+      announcement = `По итогам голосования город покидает ${exiled.username} ({{ROLE:${exiled.role}}}).`;
     }
-  } else {
-    announcement = 'Голоса разделились поровну, никто не был исключен. ';
   }
 
   const winMessage = checkWinCondition(updatedPlayers);
@@ -459,19 +459,35 @@ function resolveDay(state) {
       ...state,
       phase: 'GAME_OVER',
       phaseEndsAt: null,
-      lastAnnouncement: `${announcement}${winMessage}`,
+      lastAnnouncement: `${announcement} ${winMessage}`,
       players: updatedPlayers,
-      dayVotes: {},
+      nightActions: {},
+      dayAlibiId: null,
       detectiveReport: null
     };
   }
 
-  const nextNightPhase = getNextNightPhase(updatedPlayers, 0) || 'DAY_VOTING';
+  return {
+    ...state,
+    phase: 'DAY_RESULTS',
+    phaseEndsAt: Date.now() + 5000,
+    lastAnnouncement: announcement,
+    players: updatedPlayers,
+    nightActions: {},
+    dayAlibiId: null,
+    detectiveReport: null
+  };
+}
+
+function startNextNightFromDayResults(state) {
+  const nextNightPhase = getNextNightPhase(state.players, 0) || 'DAY_VOTING';
 
   const firstRoleMap = {
     NIGHT_MISTRESS: 'Просыпается Любовница и делает свой выбор...',
     NIGHT_DOCTOR: 'Просыпается Доктор и решает, кого спасти...',
-    NIGHT_MAFIA: 'Просыпается Мафия и выходит на охоту...'
+    NIGHT_MAFIA: 'Просыпается Мафия и выходит на охоту...',
+    NIGHT_MANIAC: 'На охоту выходит Маньяк...',
+    NIGHT_DETECTIVE: 'Просыпается Детектив и ищет преступников...'
   };
   const firstRoleLabel = firstRoleMap[nextNightPhase] || 'Город засыпает...';
 
@@ -480,8 +496,8 @@ function resolveDay(state) {
     phase: nextNightPhase,
     dayNumber: (state.dayNumber || 1) + 1,
     phaseEndsAt: null,
-    lastAnnouncement: `${announcement}Наступает ночь. ${firstRoleLabel}`,
-    players: updatedPlayers,
+    lastAnnouncement: `${state.lastAnnouncement} Наступает ночь. ${firstRoleLabel}`,
+    players: state.players,
     nightActions: {},
     dayVotes: {},
     dayAlibiId: null,
@@ -538,6 +554,10 @@ function advancePhaseIfExpired(state) {
 
   if (state.phase === 'DAY_VOTING') {
     return { changed: true, advanced: true, state: resolveDay(state) };
+  }
+
+  if (state.phase === 'DAY_RESULTS') {
+    return { changed: true, advanced: true, state: startNextNightFromDayResults(state) };
   }
 
   return { state, changed, advanced: false };
