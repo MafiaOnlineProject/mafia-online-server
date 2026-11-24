@@ -8,6 +8,7 @@ const {
   startGame, 
   resetRoomToWaiting, 
   checkWinCondition, 
+  handlePlayerLeaveInPhase,
   advancePhaseIfExpired, 
   registerAction 
 } = require('./gameEngine');
@@ -57,6 +58,7 @@ function sanitizeRoomForUser(row, state, userId) {
       username: p.username,
       isAlive: p.isAlive,
       isBot: Boolean(p.isBot),
+      isLeft: Boolean(p.isLeft),
       role: canSeeRole ? p.role : null
     };
   });
@@ -84,13 +86,7 @@ function sanitizeRoomForUser(row, state, userId) {
     dayNumber: state.dayNumber,
     phaseEndsAt: state.phaseEndsAt,
     lastAnnouncement: state.lastAnnouncement,
-    settings: state.settings || {
-      maxPlayers: 12,
-      dayDurationSec: 90,
-      nightDurationSec: 45,
-      enableMistress: true,
-      enableManiac: true
-    },
+    settings: normalizeSettings(state.settings),
     dayAlibiId: state.dayAlibiId || null,
     lastTargets: {
       MISTRESS: me?.role === 'MISTRESS' ? state.lastTargets?.MISTRESS || null : null,
@@ -102,6 +98,23 @@ function sanitizeRoomForUser(row, state, userId) {
     detectiveReport: safeDetectiveReport
   };
 }
+
+const ah = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
+
+const roomLocks = new Map();
+function withRoomLock(roomId, fn) {
+  const key = String(roomId);
+  const prev = roomLocks.get(key) || Promise.resolve();
+  const result = prev.then(fn);
+  const tail = result.catch(() => {});
+  roomLocks.set(key, tail);
+  tail.then(() => { if (roomLocks.get(key) === tail) roomLocks.delete(key); });
+  return result;
+}
+
+const roomRoute = (fn) => ah((req, res) => withRoomLock(req.params.id, () => fn(req, res)));
+
+const auth = ah(authMiddleware);
 
 //Регистрация
 app.post('/api/auth/register', async (req, res) => {
@@ -155,14 +168,14 @@ app.post('/api/auth/login', async (req, res) => {
 });
 
 // Проверка сессии
-app.get('/api/me', authMiddleware, async (req, res) => {
-  const rows = await all("SELECT * FROM rooms WHERE status != 'FINISHED' ORDER BY id DESC");
+app.get('/api/me', auth, ah(async (req, res) => {
+  const rows = await all("SELECT * FROM rooms ORDER BY id DESC");
   let activeRoom = null;
 
   for (const r of rows) {
     try {
       const state = JSON.parse(r.game_state);
-      if (state.players.some((p) => p.id === req.user.id)) {
+      if (state.players.some((p) => p.id === req.user.id && !p.isLeft)) {
         activeRoom = sanitizeRoomForUser(r, state, req.user.id);
         break;
       }
@@ -170,11 +183,11 @@ app.get('/api/me', authMiddleware, async (req, res) => {
   }
 
   res.json({ serverTime: Date.now(), user: req.user, activeRoom });
-});
+}));
 
 // Список комнат
-app.get('/api/rooms', authMiddleware, async (req, res) => {
-  const rows = await all("SELECT * FROM rooms WHERE status != 'FINISHED' ORDER BY id DESC");
+app.get('/api/rooms', auth, ah(async (req, res) => {
+  const rows = await all("SELECT * FROM rooms ORDER BY id DESC");
   const rooms = rows.map((r) => {
     const state = JSON.parse(r.game_state);
     return {
@@ -182,16 +195,17 @@ app.get('/api/rooms', authMiddleware, async (req, res) => {
       name: r.name,
       code: r.code,
       status: r.status,
-      playerCount: state.players.length,
+      phase: state.phase,
+      playerCount: state.players.filter((p) => !p.isLeft).length,
       maxPlayers: state.settings?.maxPlayers || 12
     };
   });
 
   res.json({ rooms });
-});
+}));
 
 // Создание комнаты
-app.post('/api/rooms', authMiddleware, async (req, res) => {
+app.post('/api/rooms', auth, ah(async (req, res) => {
   const name = (req.body.name || '').trim() || `Комната ${req.user.username}`;
   const settings = normalizeSettings(req.body.settings);
   const code = generateRoomCode();
@@ -223,72 +237,85 @@ app.post('/api/rooms', authMiddleware, async (req, res) => {
     serverTime: Date.now(),
     room: sanitizeRoomForUser(row, initialState, req.user.id)
   });
-});
+}));
 
 // Вход в комнату
-app.post('/api/rooms/:id/join', authMiddleware, async (req, res) => {
+app.post('/api/rooms/:id/join', auth, roomRoute(async (req, res) => {
   const row = await get('SELECT * FROM rooms WHERE id = ?', [req.params.id]);
   if (!row) return res.status(404).json({ error: 'Комната не найдена' });
 
   const state = JSON.parse(row.game_state);
-  const alreadyIn = state.players.some((p) => p.id === req.user.id);
+  const me = state.players.find((p) => p.id === req.user.id);
 
-  if (!alreadyIn) {
-    if (row.status !== 'WAITING') {
-      return res.status(400).json({ error: 'Игра уже началась' });
-    }
-
-    const maxPlayers = state.settings?.maxPlayers || 12;
-    if (state.players.length >= maxPlayers) {
-      return res.status(400).json({ error: `Комната заполнена (максимум ${maxPlayers} игроков)` });
-    }
-
-    state.players.push({ id: req.user.id, username: req.user.username, role: null, isAlive: true });
-    await run('UPDATE rooms SET game_state = ? WHERE id = ?', [JSON.stringify(state), row.id]);
+  if (me && !me.isLeft) {
+    return res.json({ serverTime: Date.now(), room: sanitizeRoomForUser(row, state, req.user.id) });
+  }
+  if (row.status !== 'WAITING') {
+    return res.status(400).json({ error: 'Игра уже началась' });
   }
 
-  res.json({ room: sanitizeRoomForUser(row, state, req.user.id) });
-});
+  const maxPlayers = state.settings?.maxPlayers || 12;
+  if (state.players.length >= maxPlayers) {
+    return res.status(400).json({ error: `Комната заполнена (максимум ${maxPlayers} игроков)` });
+  }
+
+  state.players.push({ id: req.user.id, username: req.user.username, role: null, isAlive: true });
+  await run(
+    'UPDATE rooms SET game_state = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?', 
+    [JSON.stringify(state), row.id]
+  );
+
+  res.json({ 
+    serverTime: Date.now(),
+    room: sanitizeRoomForUser(row, state, req.user.id) 
+  });
+}));
 
 // Выход из комнаты
-app.post('/api/rooms/:id/leave', authMiddleware, async (req, res) => {
+app.post('/api/rooms/:id/leave', auth, roomRoute(async (req, res) => {
   const row = await get('SELECT * FROM rooms WHERE id = ?', [req.params.id]);
   if (!row) return res.json({ ok: true });
 
-  const state = JSON.parse(row.game_state);
-  const leavingPlayer = state.players.find((p) => p.id === req.user.id);
-  state.players = state.players.filter((p) => p.id !== req.user.id);
+  let state = JSON.parse(row.game_state);
+  const leavingPlayer = state.players.find((p) => p.id === req.user.id && !p.isLeft);
+  if (!leavingPlayer) return res.json({ ok: true });
 
-  const humanPlayers = state.players.filter((p) => !p.isBot);
-  if (humanPlayers.length === 0) {
+  if (row.status === 'WAITING') {
+    state.players = state.players.filter((p) => p.id !== req.user.id);
+  } else {
+    leavingPlayer.isAlive = false;
+    leavingPlayer.isLeft = true;
+    delete state.dayVotes[leavingPlayer.id];
+
+    if (state.phase !== 'GAME_OVER') {
+      state.lastAnnouncement = `Игрок ${leavingPlayer.username} покинул игру.`;
+      const winMessage = checkWinCondition(state.players);
+      if (winMessage) {
+        state.phase = 'GAME_OVER';
+        state.phaseEndsAt = null;
+        state.lastAnnouncement += ` ${winMessage}`;
+      } else {
+        state = handlePlayerLeaveInPhase(state, leavingPlayer);
+      }
+    }
+  }
+
+  const activeHumans = state.players.filter((p) => !p.isBot && !p.isLeft);
+  if (activeHumans.length === 0) {
     await run('DELETE FROM rooms WHERE id = ?', [row.id]);
     return res.json({ ok: true });
   }
 
-  let newStatus = row.status;
-  if (row.status === 'PLAYING' && leavingPlayer) {
-    state.lastAnnouncement = `Игрок ${leavingPlayer.username} покинул игру.`;
-    const winMessage = checkWinCondition(state.players);
-    if (winMessage) {
-      state.phase = 'GAME_OVER';
-      state.phaseEndsAt = null;
-      state.lastAnnouncement += ` ${winMessage}`;
-    }
-  }
-
-  const newHostId = row.host_id === req.user.id ? humanPlayers[0].id : row.host_id;
-  await run('UPDATE rooms SET host_id = ?, status = ?, game_state = ? WHERE id = ?', [
-    newHostId,
-    newStatus,
-    JSON.stringify(state),
-    row.id
-  ]);
+  const newHostId = row.host_id === leavingPlayer.id ? activeHumans[0].id : row.host_id;
+  await run('UPDATE rooms SET host_id = ?, game_state = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?', 
+    [newHostId, JSON.stringify(state), row.id]
+  );
 
   res.json({ ok: true });
-});
+}));
 
 // Узнаём состояние комнаты
-app.get('/api/rooms/:id', authMiddleware, async (req, res) => {
+app.get('/api/rooms/:id', auth, roomRoute(async (req, res) => {
   const row = await get('SELECT * FROM rooms WHERE id = ?', [req.params.id]);
   if (!row) return res.status(404).json({ error: 'Комната закрыта' });
 
@@ -296,7 +323,7 @@ app.get('/api/rooms/:id', authMiddleware, async (req, res) => {
   const check = advancePhaseIfExpired(state);
   if (check.changed) {
     state = check.state;
-    await run('UPDATE rooms SET game_state = ? WHERE id = ?', [
+    await run('UPDATE rooms SET game_state = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?', [
       JSON.stringify(state),
       row.id
     ]);
@@ -306,10 +333,10 @@ app.get('/api/rooms/:id', authMiddleware, async (req, res) => {
     serverTime: Date.now(),
     room: sanitizeRoomForUser(row, state, req.user.id)
   });
-});
+}));
 
 // Добавление бота в комнату ожидания (только хост)
-app.post('/api/rooms/:id/add-bot', authMiddleware, async (req, res) => {
+app.post('/api/rooms/:id/add-bot', auth, roomRoute(async (req, res) => {
   const row = await get('SELECT * FROM rooms WHERE id = ?', [req.params.id]);
   if (!row) return res.status(404).json({ error: 'Комната не найдена' });
   if (row.host_id !== req.user.id) {
@@ -341,13 +368,13 @@ app.post('/api/rooms/:id/add-bot', authMiddleware, async (req, res) => {
     isBot: true
   });
 
-  await run('UPDATE rooms SET game_state = ? WHERE id = ?', [JSON.stringify(state), row.id]);
+  await run('UPDATE rooms SET game_state = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?', [JSON.stringify(state), row.id]);
 
   res.json({ room: sanitizeRoomForUser(row, state, req.user.id) });
-});
+}));
 
 // Старт игры (только хост)
-app.post('/api/rooms/:id/start', authMiddleware, async (req, res) => {
+app.post('/api/rooms/:id/start', auth, roomRoute(async (req, res) => {
   const row = await get('SELECT * FROM rooms WHERE id = ?', [req.params.id]);
   if (!row) return res.status(404).json({ error: 'Комната не найдена' });
   if (row.host_id !== req.user.id) {
@@ -364,7 +391,7 @@ app.post('/api/rooms/:id/start', authMiddleware, async (req, res) => {
   }
 
   state = startGame(state);
-  await run('UPDATE rooms SET status = ?, game_state = ? WHERE id = ?', [
+  await run('UPDATE rooms SET status = ?, game_state = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?', [
     'PLAYING',
     JSON.stringify(state),
     row.id
@@ -372,12 +399,12 @@ app.post('/api/rooms/:id/start', authMiddleware, async (req, res) => {
 
   res.json({
     serverTime: Date.now(),
-    room: sanitizeRoomForUser(row, state, req.user.id)
+    room: sanitizeRoomForUser({ ...row, status: 'PLAYING' }, state, req.user.id)
   });
-});
+}));
 
 // Перезапуск игры после завершения (только хост)
-app.post('/api/rooms/:id/restart', authMiddleware, async (req, res) => {
+app.post('/api/rooms/:id/restart', auth, roomRoute(async (req, res) => {
   const row = await get('SELECT * FROM rooms WHERE id = ?', [req.params.id]);
   if (!row) return res.status(404).json({ error: 'Комната не найдена' });
   if (row.host_id !== req.user.id) {
@@ -385,27 +412,71 @@ app.post('/api/rooms/:id/restart', authMiddleware, async (req, res) => {
   }
 
   let state = JSON.parse(row.game_state);
+  if (state.phase !== 'GAME_OVER') {
+    return res.status(400).json({ error: 'Нельзя перезапустить игру до её завершения' });
+  }
   state = resetRoomToWaiting(state);
 
-  await run('UPDATE rooms SET status = ?, game_state = ? WHERE id = ?', [
+  await run('UPDATE rooms SET status = ?, game_state = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?', [
     'WAITING',
     JSON.stringify(state),
     row.id
   ]);
 
-  res.json({ room: sanitizeRoomForUser(row, state, req.user.id) });
-});
+  res.json({ room: sanitizeRoomForUser({ ...row, status: 'WAITING' }, state, req.user.id) });
+}));
 
 // Отправка ночного хода или дневного голоса
-app.post('/api/rooms/:id/action', authMiddleware, async (req, res) => {
+app.post('/api/rooms/:id/action', auth, roomRoute(async (req, res) => {
   const row = await get('SELECT * FROM rooms WHERE id = ?', [req.params.id]);
   if (!row) return res.status(404).json({ error: 'Комната не найдена' });
 
   let state = JSON.parse(row.game_state);
-  state = registerAction(state, req.user.id, Number(req.body.targetId));
+  if (row.status !== 'PLAYING' || state.phase === 'WAITING' || state.phase === 'GAME_OVER') {
+    return res.status(400).json({ error: 'Сейчас нельзя совершать игровые действия' });
+  }
 
-  await run('UPDATE rooms SET game_state = ? WHERE id = ?', [JSON.stringify(state), row.id]);
-  res.json({ room: sanitizeRoomForUser(row, state, req.user.id) });
+  const phaseCheck = advancePhaseIfExpired(state);
+  let currentState = phaseCheck.state;
+  let accepted = false;
+  let errorMsg = '';
+
+  if (phaseCheck.advanced) {
+    errorMsg = 'Фаза уже сменилась';
+  } else {
+    const actionRes = registerAction(currentState, req.user.id, Number(req.body.targetId));
+    currentState = actionRes.state;
+    accepted = actionRes.accepted;
+    if (!accepted) {
+      errorMsg = 'Недопустимое действие или цель для текущей фазы';
+    }
+  }
+
+  if (phaseCheck.changed || accepted) {
+    await run(
+      'UPDATE rooms SET game_state = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
+      [JSON.stringify(currentState), row.id]
+    );
+  }
+
+  const payload = { 
+    serverTime: Date.now(), 
+    room: sanitizeRoomForUser(row, currentState, req.user.id) 
+  };
+
+  if (!accepted) {
+    return res.status(400).json({
+      error: errorMsg,
+      ...payload
+    });
+  }
+
+  res.json(payload);
+}));
+
+app.use((err, req, res, next) => {
+  console.error(err);
+  if (!res.headersSent) res.status(500).json({ error: 'Ошибка сервера' });
 });
 
 initDb().then(() => {
@@ -413,7 +484,13 @@ initDb().then(() => {
     console.log(`Сервер Mafia запущен на http://0.0.0.0:${PORT}`);
   });
 
-  setInterval(() => {
-    run("DELETE FROM rooms WHERE datetime(created_at) < datetime('now', '-3 hours')").catch(() => {});
+  setInterval(async () => {
+    try {
+      const stale = await all("SELECT id FROM rooms WHERE datetime(updated_at) < datetime('now','-30 minutes')");
+      for (const { id } of stale) {
+        await withRoomLock(id, () =>
+          run("DELETE FROM rooms WHERE id = ? AND datetime(updated_at) < datetime('now','-30 minutes')", [id]));
+      }
+    } catch (e) { console.error(e); }
   }, 5 * 60 * 1000);
 });
