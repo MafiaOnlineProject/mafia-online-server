@@ -4,6 +4,7 @@ const crypto = require('crypto');
 const { run, get, all, initDb } = require('./db');
 const { 
   BOT_NAMES,
+  normalizeSettings,
   startGame, 
   resetRoomToWaiting, 
   checkWinCondition, 
@@ -83,6 +84,13 @@ function sanitizeRoomForUser(row, state, userId) {
     dayNumber: state.dayNumber,
     phaseEndsAt: state.phaseEndsAt,
     lastAnnouncement: state.lastAnnouncement,
+    settings: state.settings || {
+      maxPlayers: 12,
+      dayDurationSec: 90,
+      nightDurationSec: 45,
+      enableMistress: true,
+      enableManiac: true
+    },
     dayAlibiId: state.dayAlibiId || null,
     lastTargets: {
       MISTRESS: me?.role === 'MISTRESS' ? state.lastTargets?.MISTRESS || null : null,
@@ -174,7 +182,8 @@ app.get('/api/rooms', authMiddleware, async (req, res) => {
       name: r.name,
       code: r.code,
       status: r.status,
-      playerCount: state.players.length
+      playerCount: state.players.length,
+      maxPlayers: state.settings?.maxPlayers || 12
     };
   });
 
@@ -184,12 +193,14 @@ app.get('/api/rooms', authMiddleware, async (req, res) => {
 // Создание комнаты
 app.post('/api/rooms', authMiddleware, async (req, res) => {
   const name = (req.body.name || '').trim() || `Комната ${req.user.username}`;
+  const settings = normalizeSettings(req.body.settings);
   const code = generateRoomCode();
   const initialState = {
     phase: 'WAITING',
     dayNumber: 0,
     phaseEndsAt: null,
     lastAnnouncement: '',
+    settings,
     players: [{ id: req.user.id, username: req.user.username, role: null, isAlive: true }],
     nightActions: {},
     dayVotes: {}
@@ -226,9 +237,12 @@ app.post('/api/rooms/:id/join', authMiddleware, async (req, res) => {
     if (row.status !== 'WAITING') {
       return res.status(400).json({ error: 'Игра уже началась' });
     }
-    if (state.players.length >= 12) {
-      return res.status(400).json({ error: 'Комната заполнена (максимум 12 игроков)' });
+
+    const maxPlayers = state.settings?.maxPlayers || 12;
+    if (state.players.length >= maxPlayers) {
+      return res.status(400).json({ error: `Комната заполнена (максимум ${maxPlayers} игроков)` });
     }
+
     state.players.push({ id: req.user.id, username: req.user.username, role: null, isAlive: true });
     await run('UPDATE rooms SET game_state = ? WHERE id = ?', [JSON.stringify(state), row.id]);
   }
@@ -306,8 +320,9 @@ app.post('/api/rooms/:id/add-bot', authMiddleware, async (req, res) => {
   }
 
   const state = JSON.parse(row.game_state);
-  if (state.players.length >= 12) {
-    return res.status(400).json({ error: 'Комната заполнена (максимум 12 игроков)' });
+  const maxPlayers = state.settings?.maxPlayers || 12;
+  if (state.players.length >= maxPlayers) {
+    return res.status(400).json({ error: `Комната заполнена (максимум ${maxPlayers} игроков)` });
   }
 
   const usedNames = new Set(state.players.map((p) => p.username));

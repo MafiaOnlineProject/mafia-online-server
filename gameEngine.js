@@ -1,7 +1,3 @@
-const NIGHT_DURATION_MS = 45 * 1000; //Время для каджой ночной роли
-const DAY_DURATION_MS = 90 * 1000; //Время на девное обсуждение и голосование
-//Позже можно добавить возможность выставлять время самому хосту комнаты
-
 const NIGHT_ROLES_ORDER = [
   { phase: 'NIGHT_MISTRESS', roles: ['MISTRESS'] },
   { phase: 'NIGHT_DOCTOR', roles: ['DOCTOR'] },
@@ -9,6 +5,48 @@ const NIGHT_ROLES_ORDER = [
   { phase: 'NIGHT_MANIAC', roles: ['MANIAC'] },
   { phase: 'NIGHT_DETECTIVE', roles: ['DETECTIVE'] }
 ];
+
+const BOT_NAMES = [
+  'Бот Виктор',
+  'Бот Анна',
+  'Бот Марк',
+  'Бот Соня',
+  'Бот Артур',
+  'Бот Елена',
+  'Бот Денис',
+  'Бот Кира',
+  'Бот Павел',
+  'Бот Ольга',
+  'Бот Тимур',
+  'Бот Алиса',
+  'Бот Роман',
+  'Бот Дарья',
+  'Бот Игорь'
+];
+
+const ALLOWED_MAX_PLAYERS = [6, 8, 10, 12, 16];
+const ALLOWED_DAY_DURATIONS = [60, 90, 120, 150];
+const ALLOWED_NIGHT_DURATIONS = [20, 30, 45, 60];
+
+function normalizeSettings(raw = {}) {
+  const maxPlayers = ALLOWED_MAX_PLAYERS.includes(Number(raw.maxPlayers))
+    ? Number(raw.maxPlayers)
+    : 12;
+  const dayDurationSec = ALLOWED_DAY_DURATIONS.includes(Number(raw.dayDurationSec))
+    ? Number(raw.dayDurationSec)
+    : 90;
+  const nightDurationSec = ALLOWED_NIGHT_DURATIONS.includes(Number(raw.nightDurationSec))
+    ? Number(raw.nightDurationSec)
+    : 45;
+
+  return {
+    maxPlayers,
+    dayDurationSec,
+    nightDurationSec,
+    enableMistress: raw.enableMistress !== false,
+    enableManiac: raw.enableManiac !== false
+  };
+}
 
 function shuffle(array) {
   const arr = [...array];
@@ -19,16 +57,24 @@ function shuffle(array) {
   return arr;
 }
 
-function assignRoles(players) {
+function assignRoles(players, rawSettings = {}) {
+  const settings = normalizeSettings(rawSettings);
   const count = players.length;
   const rolesPool = ['MAFIA', 'DOCTOR', 'DETECTIVE'];
 
-  //Если игроков больше 8, добавляем вторую мафию
   if (count >= 8) {
-    rolesPool.push('MAFIA_BOSS', 'MISTRESS');
+    rolesPool.push('MAFIA_BOSS');
+    if (settings.enableMistress) {
+      rolesPool.push('MISTRESS');
+    }
   }
+
   if (count >= 12) {
-    rolesPool.push('MANIAC');
+    if (settings.enableManiac) {
+      rolesPool.push('MANIAC');
+    } else {
+      rolesPool.push('MAFIA'); // Если Маньяк выключен при 12+, добавляем 3-ю Мафию
+    }
   }
 
   while (rolesPool.length < count) {
@@ -81,17 +127,6 @@ function checkWinCondition(players) {
   }
   return null;
 }
-
-const BOT_NAMES = [
-  'Бот Виктор',
-  'Бот Анна',
-  'Бот Марк',
-  'Бот Соня',
-  'Бот Артур',
-  'Бот Елена',
-  'Бот Денис',
-  'Бот Кира'
-];
 
 function randomItem(arr) {
   if (!arr.length) return null;
@@ -212,12 +247,14 @@ function isCurrentNightActorBot(state) {
 }
 
 function getPhaseDurationMs(state) {
-  if (state.phase === 'DAY_VOTING') return DAY_DURATION_MS; 
-  return isCurrentNightActorBot(state) ? 4000 : NIGHT_DURATION_MS;
+  const settings = normalizeSettings(state.settings);
+  if (state.phase === 'DAY_VOTING') return settings.dayDurationSec * 1000; 
+  return isCurrentNightActorBot(state) ? 4000 : settings.nightDurationSec * 1000;
 }
 
 function startGame(state) {
-  const updatedPlayers = assignRoles(state.players);
+  const settings = normalizeSettings(state.settings);
+  const updatedPlayers = assignRoles(state.players, settings);
   const firstPhase = getNextNightPhase(updatedPlayers, 0) || 'DAY_VOTING';
 
   let nextState = {
@@ -358,10 +395,12 @@ function resolveNight(state) {
     };
   }
 
+  const settings = normalizeSettings(state.settings);
+
   let dayState = {
     ...state,
     phase: 'DAY_VOTING',
-    phaseEndsAt: Date.now() + DAY_DURATION_MS,
+    phaseEndsAt: Date.now() + settings.dayDurationSec * 1000,
     lastAnnouncement: announcement.trim(),
     players: updatedPlayers,
     nightActions: {},
@@ -548,11 +587,13 @@ function resetRoomToWaiting(state) {
     dayNumber: 0,
     phaseEndsAt: null,
     lastAnnouncement: '',
+    settings: normalizeSettings(state.settings),
     players: state.players.map((p) => ({
       id: p.id,
       username: p.username,
       role: null,
-      isAlive: true
+      isAlive: true,
+      isBot: Boolean(p.isBot)
     })),
     nightActions: {},
     dayVotes: {},
@@ -563,6 +604,7 @@ function resetRoomToWaiting(state) {
 
 module.exports = { 
   BOT_NAMES,
+  normalizeSettings,
   isMafiaTeam, 
   checkWinCondition, 
   startGame, 
