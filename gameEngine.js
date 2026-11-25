@@ -77,7 +77,7 @@ function normalizeSettings(raw = {}) {
 
 const MAX_LOG = 100;
 
-function pushLog(state, text, { type = 'info', channel = 'public' } = {}) {
+function pushLog(state, text, { type = 'info', channel = 'public', visibleTo = null } = {}) {
   const clean = String(text || '').trim();
   if (!clean) return state;
   if (!Array.isArray(state.log)) state.log = [];
@@ -89,11 +89,34 @@ function pushLog(state, text, { type = 'info', channel = 'public' } = {}) {
     kind: 'system',
     type,
     channel,
+    visibleTo,
     authorId: null,
     text: clean
   });
   if (state.log.length > MAX_LOG) state.log = state.log.slice(-MAX_LOG);
   return state;
+}
+
+function logNightAction(state, actor, target) {
+  const t = target.username;
+  switch (state.phase) {
+    case 'NIGHT_MISTRESS':
+      pushLog(state, `Вы отправились в гости к игроку ${t}.`, { type: 'action', visibleTo: actor.id });
+      break;
+    case 'NIGHT_DOCTOR':
+      pushLog(state, actor.id === target.id ? 'Вы решили лечить себя.' : `Вы решили лечить игрока ${t}.`,
+        { type: 'action', visibleTo: actor.id });
+      break;
+    case 'NIGHT_MAFIA':
+      pushLog(state, `Мафия выбрала жертву: ${t}.`, { type: 'mafia', channel: 'mafia' });
+      break;
+    case 'NIGHT_MANIAC':
+      pushLog(state, `Вы выбрали жертву: ${t}.`, { type: 'action', visibleTo: actor.id });
+      break;
+    case 'NIGHT_DETECTIVE':
+      pushLog(state, `Вы проверяете игрока ${t}. Результат будет утром.`, { type: 'action', visibleTo: actor.id });
+      break;
+  }
 }
 
 function shuffle(array) {
@@ -204,7 +227,10 @@ function performBotActions(state) {
     const actor = getActiveNightActor(state);
     if (actor?.isBot && !state.nightActions[step.actionKey]) {
       const choice = randomItem(step.getBotTargets(alive, actor, state));
-      if (choice) state.nightActions[step.actionKey] = choice.id;
+      if (choice) {
+        state.nightActions[step.actionKey] = choice.id;
+        logNightAction(state, actor, choice);
+      }
     }
     return state;
   } else if (state.phase === 'DAY_VOTING') {
@@ -293,7 +319,7 @@ function startGame(state) {
     logSeq: 0
   };
 
-  pushLog(nextState, 'Игра началась. Роли розданы, город засыпает.', { type: 'start' });
+  pushLog(nextState, 'Игра началась. Роли розданы.', { type: 'start' });
   nextState = performBotActions(nextState);
   nextState.phaseEndsAt = Date.now() + getPhaseDurationMs(nextState);
   return nextState;
@@ -397,6 +423,10 @@ function resolveNight(state) {
     }
   }
 
+  if (detectiveReport) {
+    pushLog(state, '🔍 ' + detectiveReport.message, { type: 'private', visibleTo: detectiveReport.detectiveId });
+  }
+
   const updatedLastTargets = {
     MISTRESS: mistressTargetId || null,
     DOCTOR: effectiveHealedId || null
@@ -410,7 +440,7 @@ function resolveNight(state) {
       ...state,
       phase: 'GAME_OVER',
       phaseEndsAt: null,
-      lastAnnouncement: `${announcement.trim()} ${winMessage}`,
+      lastAnnouncement: `${winMessage}`,
       players: updatedPlayers,
       nightActions: {},
       dayVotes: {},
@@ -426,7 +456,6 @@ function resolveNight(state) {
     ...state,
     phase: 'DAY_VOTING',
     phaseEndsAt: Date.now() + settings.dayDurationSec * 1000,
-    lastAnnouncement: announcement.trim(),
     players: updatedPlayers,
     nightActions: {},
     dayVotes: {},
@@ -487,7 +516,7 @@ function resolveDay(state) {
       ...state,
       phase: 'GAME_OVER',
       phaseEndsAt: null,
-      lastAnnouncement: `${announcement} ${winMessage}`,
+      lastAnnouncement: `${winMessage}`,
       players: updatedPlayers,
       nightActions: {},
       dayAlibiId: null,
@@ -499,7 +528,6 @@ function resolveDay(state) {
     ...state,
     phase: 'DAY_RESULTS',
     phaseEndsAt: Date.now() + 5000,
-    lastAnnouncement: announcement,
     players: updatedPlayers,
     nightActions: {},
     dayAlibiId: null,
@@ -524,7 +552,7 @@ function startNextNightFromDayResults(state) {
     phase: nextNightPhase,
     dayNumber: (state.dayNumber || 1) + 1,
     phaseEndsAt: null,
-    lastAnnouncement: `${state.lastAnnouncement} Наступает ночь. ${firstRoleLabel}`,
+    lastAnnouncement: `Наступает ночь. ${firstRoleLabel}`,
     players: state.players,
     nightActions: {},
     dayVotes: {},
@@ -605,29 +633,33 @@ function registerAction(state, userId, targetId) {
   let accepted = false;
 
   if (state.phase === 'NIGHT_MISTRESS' && actor.role === 'MISTRESS') {
-    if (state.lastTargets?.MISTRESS !== targetId) {
+    if (!state.nightActions.MISTRESS && state.lastTargets?.MISTRESS !== targetId) {
       state.nightActions.MISTRESS = targetId;
       accepted = true;
     }
   } else if (state.phase === 'NIGHT_DOCTOR' && actor.role === 'DOCTOR') {
-    if (state.lastTargets?.DOCTOR !== targetId) {
+    if (!state.nightActions.DOCTOR && state.lastTargets?.DOCTOR !== targetId) {
       state.nightActions.DOCTOR = targetId;
       accepted = true;
     }
   } else if (state.phase === 'NIGHT_MAFIA') {
     const shooter = getActiveMafiaShooter(state.players);
-    if (shooter && shooter.id === userId && !isMafiaTeam(target.role)) {
+    if (!state.nightActions.MAFIA && shooter && shooter.id === userId && !isMafiaTeam(target.role)) {
       state.nightActions.MAFIA = targetId;
       accepted = true;
     }
   } else if (state.phase === 'NIGHT_MANIAC' && actor.role === 'MANIAC') {
-    state.nightActions.MANIAC = targetId;
-    accepted = true;
+    if (!state.nightActions.MANIAC) {
+      state.nightActions.MANIAC = targetId;
+      accepted = true;
+    }
   } else if (state.phase === 'NIGHT_DETECTIVE' && actor.role === 'DETECTIVE') {
-    state.nightActions.DETECTIVE = targetId;
-    accepted = true;
+    if (!state.nightActions.DETECTIVE) {
+      state.nightActions.DETECTIVE = targetId;
+      accepted = true;
+    }
   } else if (state.phase === 'DAY_VOTING') {
-    if (state.dayAlibiId !== targetId) {
+    if (!state.dayVotes[userId] && state.dayAlibiId !== targetId) {
       state.dayVotes[userId] = targetId;
       accepted = true;
     }
@@ -635,6 +667,10 @@ function registerAction(state, userId, targetId) {
 
   if (accepted && state.phaseEndsAt && isPhaseReadyToAdvance(state) && state.phaseEndsAt - Date.now() > 3000) {
     state.phaseEndsAt = Date.now() + 3000;
+  }
+
+  if (accepted && state.phase !== 'DAY_VOTING') {
+    logNightAction(state, actor, target);
   }
 
   return { state, accepted };

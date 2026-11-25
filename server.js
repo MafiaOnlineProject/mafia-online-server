@@ -60,7 +60,10 @@ function sanitizeRoomForUser(row, state, userId) {
       isAlive: p.isAlive,
       isBot: Boolean(p.isBot),
       isLeft: Boolean(p.isLeft),
-      role: canSeeRole ? p.role : null
+      role: canSeeRole ? p.role : null,
+      log: (state.log || [])
+        .filter((e) => e.channel === 'public' && (!e.visibleTo || e.visibleTo === userId))
+        .map(({ visibleTo, ...rest }) => rest)
     };
   });
 
@@ -100,7 +103,13 @@ function sanitizeRoomForUser(row, state, userId) {
     nightActions: safeNightActions,
     dayVotes: revealVotes ? (state.dayVotes || {}) : (myVote ? { [userId]: myVote } : {}),
     detectiveReport: safeDetectiveReport,
-    log: (state.log || []).filter((e) => e.channel === 'public')
+    log: (state.log || [])
+      .filter((e) => {
+        if (e.visibleTo && e.visibleTo !== userId) return false;
+        if (e.channel === 'mafia') return amIMafia;
+        return e.channel === 'public';
+      })
+      .map(({ visibleTo, ...rest }) => rest)
   };
 }
 
