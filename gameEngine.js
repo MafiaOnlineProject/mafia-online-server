@@ -75,6 +75,27 @@ function normalizeSettings(raw = {}) {
   };
 }
 
+const MAX_LOG = 100;
+
+function pushLog(state, text, { type = 'info', channel = 'public' } = {}) {
+  const clean = String(text || '').trim();
+  if (!clean) return state;
+  if (!Array.isArray(state.log)) state.log = [];
+  state.logSeq = (state.logSeq || 0) + 1;
+  state.log.push({
+    id: state.logSeq,
+    at: Date.now(),
+    day: state.dayNumber || 0,
+    kind: 'system',
+    type,
+    channel,
+    authorId: null,
+    text: clean
+  });
+  if (state.log.length > MAX_LOG) state.log = state.log.slice(-MAX_LOG);
+  return state;
+}
+
 function shuffle(array) {
   const arr = [...array];
   for (let i = arr.length - 1; i > 0; i--) {
@@ -267,9 +288,12 @@ function startGame(state) {
     dayVotes: {},
     dayAlibiId: null,
     lastTargets: { MISTRESS: null, DOCTOR: null },
-    detectiveReport: null
+    detectiveReport: null,
+    log: [],
+    logSeq: 0
   };
 
+  pushLog(nextState, 'Игра началась. Роли розданы, город засыпает.', { type: 'start' });
   nextState = performBotActions(nextState);
   nextState.phaseEndsAt = Date.now() + getPhaseDurationMs(nextState);
   return nextState;
@@ -379,6 +403,8 @@ function resolveNight(state) {
   };
 
   const winMessage = checkWinCondition(updatedPlayers);
+  pushLog(state, announcement, { type: 'night' });
+  if (winMessage) pushLog(state, winMessage, { type: 'end' });
   if (winMessage) {
     return {
       ...state,
@@ -454,6 +480,8 @@ function resolveDay(state) {
   }
 
   const winMessage = checkWinCondition(updatedPlayers);
+  pushLog(state, announcement, { type: 'vote' });
+  if (winMessage) pushLog(state, winMessage, { type: 'end' });
   if (winMessage) {
     return {
       ...state,
@@ -632,7 +660,9 @@ function resetRoomToWaiting(state) {
     nightActions: {},
     dayVotes: {},
     lastTargets: { MISTRESS: null, DOCTOR: null },
-    detectiveReport: null
+    detectiveReport: null,
+    log: [],
+    logSeq: 0
   };
 }
 
@@ -645,5 +675,6 @@ module.exports = {
   handlePlayerLeaveInPhase,
   advancePhaseIfExpired, 
   registerAction,
-  resetRoomToWaiting
+  resetRoomToWaiting,
+  pushLog
 };

@@ -10,7 +10,8 @@ const {
   checkWinCondition, 
   handlePlayerLeaveInPhase,
   advancePhaseIfExpired, 
-  registerAction 
+  registerAction,
+  pushLog
 } = require('./gameEngine');
 
 const app = express();
@@ -98,7 +99,8 @@ function sanitizeRoomForUser(row, state, userId) {
     players: safePlayers,
     nightActions: safeNightActions,
     dayVotes: revealVotes ? (state.dayVotes || {}) : (myVote ? { [userId]: myVote } : {}),
-    detectiveReport: safeDetectiveReport
+    detectiveReport: safeDetectiveReport,
+    log: (state.log || []).filter((e) => e.channel === 'public')
   };
 }
 
@@ -292,12 +294,16 @@ app.post('/api/rooms/:id/leave', auth, roomRoute(async (req, res) => {
     delete state.dayVotes[leavingPlayer.id];
 
     if (state.phase !== 'GAME_OVER') {
-      state.lastAnnouncement = `Игрок ${leavingPlayer.username} покинул игру.`;
+      const leaveText = `Игрок ${leavingPlayer.username} покинул игру.`;
+      state.lastAnnouncement = leaveText;
+      pushLog(state, leaveText, { type: 'leave' });
+
       const winMessage = checkWinCondition(state.players);
       if (winMessage) {
         state.phase = 'GAME_OVER';
         state.phaseEndsAt = null;
         state.lastAnnouncement += ` ${winMessage}`;
+        pushLog(state, winMessage, { type: 'end' })
       } else {
         state = handlePlayerLeaveInPhase(state, leavingPlayer);
       }
