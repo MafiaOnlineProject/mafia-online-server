@@ -209,7 +209,8 @@ app.get('/api/rooms', auth, ah(async (req, res) => {
 
 // Создание комнаты
 app.post('/api/rooms', auth, ah(async (req, res) => {
-  const name = (req.body.name || '').trim() || `Комната ${req.user.username}`;
+  const rawName = typeof req.body.name === 'string' ? req.body.name.trim() : '';
+  const name = rawName.slice(0, 30) || `Комната ${req.user.username}`;
   const settings = normalizeSettings(req.body.settings);
   const code = generateRoomCode();
   const initialState = {
@@ -410,6 +411,43 @@ app.post('/api/rooms/:id/kick', auth, roomRoute(async (req, res) => {
   res.json({
     serverTime: Date.now(),
     room: sanitizeRoomForUser(row, state, req.user.id)
+  });
+}));
+
+// Обновление настроек комнаты хостом (только в комнате ожидания)
+app.patch('/api/rooms/:id/settings', auth, roomRoute(async (req, res) => {
+  const row = await get('SELECT * FROM rooms WHERE id = ?', [req.params.id]);
+  if (!row) return res.status(404).json({ error: 'Комната не найдена' });
+
+  if (row.host_id !== req.user.id) {
+    return res.status(403).json({ error: 'Только создатель может менять настройки комнаты' });
+  }
+
+  if (row.status !== 'WAITING') {
+    return res.status(400).json({ error: 'Нельзя менять настройки во время игры' });
+  }
+
+  const state = JSON.parse(row.game_state);
+  const newSettings = normalizeSettings({ ...state.settings, ...(req.body.settings || {}) });
+
+  if (state.players.length > newSettings.maxPlayers) {
+    return res.status(400).json({
+      error: `В комнате уже ${state.players.length} игроков — сначала исключите лишних или выберите больший размер`
+    });
+  }
+
+  const rawName = typeof req.body.name === 'string' ? req.body.name.trim() : '';
+  const newName = rawName.slice(0, 30) || row.name;
+  state.settings = newSettings;
+
+  await run(
+    'UPDATE rooms SET name = ?, game_state = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
+    [newName, JSON.stringify(state), row.id]
+  );
+
+  res.json({
+    serverTime: Date.now(),
+    room: sanitizeRoomForUser({ ...row, name: newName }, state, req.user.id)
   });
 }));
 
