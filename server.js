@@ -1,7 +1,7 @@
 const express = require('express');
 const cors = require('cors');
 const crypto = require('crypto');
-const { run, get, all, initDb } = require('./db');
+const { run, get, all, hashToken, initDb } = require('./db');
 const { 
   BOT_NAMES,
   normalizeSettings,
@@ -20,10 +20,6 @@ const PORT = process.env.PORT || 3000;
 app.use(cors());
 app.use(express.json());
 
-function hashPassword(password) {
-  return crypto.createHash('sha256').update(password).digest('hex');
-}
-
 function generateToken() {
   return crypto.randomBytes(24).toString('hex');
 }
@@ -33,14 +29,21 @@ function generateRoomCode() {
 }
 
 async function authMiddleware(req, res, next) {
-  const authHeader = req.headers.authorization || '';
-  const token = authHeader.replace('Bearer ', '').trim();
+  const token = (req.headers.authorization || '').replace('Bearer ', '').trim();
   if (!token) return res.status(401).json({ error: 'Требуется авторизация' });
 
-  const user = await get('SELECT id, username FROM users WHERE token = ?', [token]);
+  const user = await get(
+    'SELECT id, username, last_seen_at FROM users WHERE token_hash = ?',
+    [hashToken(token)]
+  );
   if (!user) return res.status(401).json({ error: 'Недействительная сессия' });
 
-  req.user = user;
+  const now = Date.now();
+  if (now - user.last_seen_at > 60 * 1000) {
+    await run('UPDATE users SET last_seen_at = ? WHERE id = ?', [now, user.id]);
+  }
+
+  req.user = { id: user.id, username: user.username };
   next();
 }
 
@@ -130,56 +133,57 @@ const roomRoute = (fn) => ah((req, res) => withRoomLock(req.params.id, () => fn(
 
 const auth = ah(authMiddleware);
 
+app.set('trust proxy', 1);
+
+const regAttempts = new Map();
+function registerLimiter(req, res, next) {
+  const now = Date.now();
+  const windowMs = 60 * 1000;
+  const max = 8;
+  const list = (regAttempts.get(req.ip) || []).filter((t) => now - t < windowMs);
+  if (list.length >= max) {
+    return res.status(429).json({ error: 'Слишком много попыток, подождите минуту' });
+  }
+  list.push(now);
+  regAttempts.set(req.ip, list);
+  next();
+}
+
 //Регистрация
-app.post('/api/auth/register', async (req, res) => {
+app.post('/api/auth/register', registerLimiter, ah(async (req, res) => {
+  const username = typeof req.body.username === 'string'
+    ? req.body.username.trim().replace(/\s+/g, ' ')
+    : '';
+
+  if (username.length < 2 || username.length > 16) {
+    return res.status(400).json({ error: 'Имя должно быть от 2 до 16 символов' });
+  }
+  if (/^бот(\s|$)/i.test(username)) {
+    return res.status(400).json({ error: 'Это имя зарезервировано за ботами' });
+  }
+
+  const existing = await get('SELECT id FROM users WHERE username = ? COLLATE NOCASE', [username]);
+  if (existing) return res.status(400).json({ error: 'Это имя уже занято' });
+
+  const token = generateToken();
   try {
-    const username = (req.body.username || '').trim();
-    const password = req.body.password || '';
-    if (username.length < 2) {
-      return res.status(400).json({ error: 'Слишком короткий логин'});
-     } else if (password.length < 3) {
-       return res.status(400).json({ error: 'Слишком короткий пароль'});
-     }
-
-    const existing = await get('SELECT id FROM users WHERE username = ?', [username]);
-    if (existing) {
-      return res.status(400).json({ error: 'Это имя уже занято' });
-    }
-
-    const token = generateToken();
     const result = await run(
-      'INSERT INTO users (username, password_hash, token) VALUES (?, ?, ?)',
-      [username, hashPassword(password), token]
+      'INSERT INTO users (username, password_hash, token_hash, last_seen_at) VALUES (?, ?, ?, ?)',
+      [username, '', hashToken(token), Date.now()]
     );
-
     res.json({ token, user: { id: result.id, username } });
   } catch (err) {
-    res.status(500).json({ error: 'Ошибка сервера при регистрации' });
-  }
-});
-
-// Авторизация
-app.post('/api/auth/login', async (req, res) => {
-  try {
-    const username = (req.body.username || '').trim();
-    const password = req.body.password || '';
-    const user = await get(
-      'SELECT id, username, password_hash FROM users WHERE username = ?', 
-      [username]
-    );
-
-    if (!user || user.password_hash !== hashPassword(password)) {
-      return res.status(401).json({ error: 'Неверный логин или пароль' });
+    if (err.code === 'SQLITE_CONSTRAINT') {
+      return res.status(400).json({ error: 'Это имя уже занято' });
     }
-
-    const token = generateToken();
-    await run('UPDATE users SET token = ? WHERE id = ?',[token, user.id]);
-
-    res.json({ token, user: { id: user.id, username: user.username } });
-  } catch (err) {
-    res.status(500).json({ error: 'Ошибка сервера при авторизации' });
+    throw err;
   }
-});
+}));
+
+app.post('/api/auth/logout', auth, ah(async (req, res) => {
+  await run('DELETE FROM users WHERE id = ?', [req.user.id]);
+  res.json({ ok: true });
+}));
 
 // Проверка сессии
 app.get('/api/me', auth, ah(async (req, res) => {
@@ -583,6 +587,13 @@ initDb().then(() => {
       for (const { id } of stale) {
         await withRoomLock(id, () =>
           run("DELETE FROM rooms WHERE id = ? AND datetime(updated_at) < datetime('now','-30 minutes')", [id]));
+      }
+
+      await run('DELETE FROM users WHERE last_seen_at < ?', [Date.now() - 24 * 60 * 60 * 1000]);
+
+      const cutoff = Date.now() - 60 * 1000;
+      for (const [ip, list] of regAttempts) {
+        if (!list.some((t) => t > cutoff)) regAttempts.delete(ip);
       }
     } catch (e) { console.error(e); }
   }, 5 * 60 * 1000);

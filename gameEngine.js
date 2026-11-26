@@ -214,6 +214,19 @@ function checkWinCondition(players) {
   return null;
 }
 
+function getBotActTime(state, botId, maxDelayMs) {
+  const prefix = `${state.dayNumber}:${state.phase}:`;
+  if (!state.botActAt || state.botActAtPrefix !== prefix) {
+    state.botActAt = {};
+    state.botActAtPrefix = prefix;
+  }
+  if (!(botId in state.botActAt)) {
+    const minDelay = 1500;
+    state.botActAt[botId] = Date.now() + minDelay + Math.random() * Math.max(0, maxDelayMs - minDelay);
+  }
+  return state.botActAt[botId];
+}
+
 function randomItem(arr) {
   if (!arr.length) return null;
   return arr[Math.floor(Math.random() * arr.length)];
@@ -221,26 +234,36 @@ function randomItem(arr) {
 
 function performBotActions(state) {
   const alive = state.players.filter((p) => p.isAlive);
+  const settings = normalizeSettings(state.settings);
+  const now = Date.now();
 
   const step = getNightStep(state.phase);
   if (step) {
     const actor = getActiveNightActor(state);
     if (actor?.isBot && !state.nightActions[step.actionKey]) {
-      const choice = randomItem(step.getBotTargets(alive, actor, state));
-      if (choice) {
-        state.nightActions[step.actionKey] = choice.id;
-        logNightAction(state, actor, choice);
+      const maxDelay = Math.min(20000, settings.nightDurationSec * 1000 - 5000);
+      if (now >= getBotActTime(state, actor.id, maxDelay)) {
+        const choice = randomItem(step.getBotTargets(alive, actor, state));
+        if (choice) {
+          state.nightActions[step.actionKey] = choice.id;
+        }
       }
     }
     return state;
-  } else if (state.phase === 'DAY_VOTING') {
+  }
+
+  if (state.phase === 'DAY_VOTING') {
+    const maxDelay = Math.min(30000, settings.dayDurationSec * 1000 - 5000);
+
     alive
       .filter((p) => p.isBot && !state.dayVotes[p.id])
       .forEach((bot) => {
-        const isBotMafia = bot.role === 'MAFIA' || bot.role === 'MAFIA_BOSS';
+        if (now < getBotActTime(state, bot.id, maxDelay)) return;
+
+        const isBotMafia = isMafiaTeam(bot.role);
         const targets = alive.filter((p) => {
           if (p.id === bot.id || p.id === state.dayAlibiId) return false;
-          if (isBotMafia && (p.role === 'MAFIA' || p.role === 'MAFIA_BOSS')) return false;
+          if (isBotMafia && isMafiaTeam(p.role)) return false;
           return true;
         });
         if (!targets.length) return;
@@ -248,12 +271,10 @@ function performBotActions(state) {
         const validIds = new Set(targets.map((p) => p.id));
         const existingVotes = Object.values(state.dayVotes).filter((id) => validIds.has(id));
 
-        let targetId = null;
-        if (existingVotes.length > 0 && Math.random() < 0.7) {
-          targetId = randomItem(existingVotes);
-        } else {
-          targetId = randomItem(targets)?.id;
-        }
+        const targetId =
+          existingVotes.length > 0 && Math.random() < 0.7
+            ? randomItem(existingVotes)
+            : randomItem(targets)?.id;
 
         if (targetId) state.dayVotes[bot.id] = targetId;
       });
@@ -288,14 +309,10 @@ function handlePlayerLeaveInPhase(state, leftPlayer) {
   return state;
 }
 
-function isCurrentNightActorBot(state) {
-  return Boolean(getActiveNightActor(state)?.isBot);
-}
-
 function getPhaseDurationMs(state) {
   const settings = normalizeSettings(state.settings);
-  if (state.phase === 'DAY_VOTING') return settings.dayDurationSec * 1000; 
-  return isCurrentNightActorBot(state) ? 4000 : settings.nightDurationSec * 1000;
+  if (state.phase === 'DAY_VOTING') return settings.dayDurationSec * 1000;
+  return settings.nightDurationSec * 1000;
 }
 
 function startGame(state) {
@@ -568,8 +585,10 @@ function startNextNightFromDayResults(state) {
 function advancePhaseIfExpired(state) {
   let changed = false;
 
-  const prevCount =
-    Object.keys(state.nightActions || {}).length + Object.keys(state.dayVotes || {}).length;
+  const snapshot = () =>
+  JSON.stringify([state.nightActions, state.dayVotes, state.botActAt]);
+
+  const before = snapshot();
   state = performBotActions(state);
 
   if (
@@ -581,11 +600,7 @@ function advancePhaseIfExpired(state) {
     changed = true;
   }
 
-  const nextCount =
-    Object.keys(state.nightActions || {}).length + Object.keys(state.dayVotes || {}).length;
-  if (nextCount !== prevCount) {
-    changed = true;
-  }
+  if (snapshot() !== before) changed = true;
 
   if (!state.phaseEndsAt || Date.now() < state.phaseEndsAt) {
     return { state, changed, advanced: false };
